@@ -193,11 +193,14 @@ class SetupFactory8Extractor(SetupFactoryExtractor):
             decompressed_data = f.read()
         script_data = BytesIO(decompressed_data)
         file_data_index = decompressed_data.find(b"CSetupFileData")
-        if file_data_index < 8:
+        index = decompressed_data.rfind(b"All", None, file_data_index)
+        if index == -1:
             return
 
-        script_data.seek(file_data_index - 8, os.SEEK_SET)
+        script_data.seek(index + 3, os.SEEK_SET)
         num_entries = struct.unpack("H", script_data.read(2))[0]
+        if num_entries == 0xFFFF:
+            num_entries = struct.unpack("I", script_data.read(4))[0]
         script_data.seek(4, os.SEEK_CUR)  # Skip 2 unknown uint16_t numbers, always 0xFFFF and 0x0001
         class_name_length = struct.unpack("H", script_data.read(2))[0]
         class_name = script_data.read(min(class_name_length, 127)).split(b"\x00", 1)[0]
