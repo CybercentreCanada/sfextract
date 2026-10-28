@@ -30,6 +30,15 @@ def valid_signature(overlay):
     return b"".join(struct.unpack("c" * len(SIGNATURE), potential_signature)) == SIGNATURE
 
 
+def has_xored_mz(overlay, shift):
+    # irsetup.exe size (4 bytes), then its data, which starts with "MZ" XOR-ed with 0x07
+    position = overlay.tell()
+    overlay.seek(shift + 4, os.SEEK_CUR)
+    start = overlay.read(2)
+    overlay.seek(position, os.SEEK_SET)
+    return start == xor_two_bytes(b"MZ", b"\x07")
+
+
 def get_extractor(pe: pefile):
     overlay = BytesIO(pe.get_overlay())
 
@@ -183,8 +192,9 @@ class SetupFactory7Extractor(SetupFactoryExtractor):
         os.makedirs(output_location, exist_ok=True)
 
         # Read embedded installer .exe
-        # TODO: some file do not have 1 byte shift, investigate
-        self.overlay.seek(1, os.SEEK_CUR)
+        # 7.0.6 has 1 byte before it, 7.0.1 and 7.0.3 do not: the XOR-ed "MZ" tells
+        if not has_xored_mz(self.overlay, 0):
+            self.overlay.seek(1, os.SEEK_CUR)
         self.files.append(ReadSpecialFile(self.overlay, output_location, FILENAME_EMBEDDED_INSTALLER, True))
         num_files = struct.unpack("I", self.overlay.read(4))[0]
 

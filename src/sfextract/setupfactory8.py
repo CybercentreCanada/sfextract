@@ -105,7 +105,7 @@ def get_version(pe: pefile):
             or b"<description>Setup Factory Run-time</description>" in manifest
         ):
             major_version, minor_version = GetVersionFromManifest(manifest)
-            if major_version == 9:
+            if major_version in (9, 10):
                 return (major_version, minor_version)
             return (-1, -1)
 
@@ -115,7 +115,7 @@ def get_version(pe: pefile):
 
     if check_bogus_manifest:
         major_version, minor_version, product_names = GetVersionInfoData(pe)
-        if major_version == 9 and any(product_name == b"Setup Factory Runtime" for product_name in product_names):
+        if major_version in (9, 10) and any(product_name == b"Setup Factory Runtime" for product_name in product_names):
             return (major_version, minor_version)
 
     return (-1, -1)
@@ -142,6 +142,26 @@ def ReadString(script_data: BytesIO):
     return script_data.read(string_size).split(b"\x00", 1)[0]
     # This should be based on the max length in the c structure that is holding it?
     # return script_data.read(min(string_size, 1024), os.SEEK_CUR).split(b"\x00", 1)[0]
+
+
+def GetDependencySize(decompressed_data):
+    # Seen in Setup Factory 8.1: one CSetupDependency holding one CDependencyFile
+    # (count, class header, 4 bytes, source path, two equal 64-bit sizes)
+    dependency_index = decompressed_data.find(b"\xff\xff\x01\x00\x10\x00CSetupDependency")
+    if dependency_index < 2:
+        return 0
+    file_index = decompressed_data.find(b"\xff\xff\x01\x00\x0f\x00CDependencyFile", dependency_index)
+    if file_index < 2:
+        return 0
+    script_data = BytesIO(decompressed_data)
+    script_data.seek(file_index - 2, os.SEEK_SET)
+    num_files = struct.unpack("H", script_data.read(2))[0]
+    if struct.unpack("H", decompressed_data[dependency_index - 2 : dependency_index])[0] != 1 or num_files != 1:
+        raise NotImplementedError("Only one dependency module with one file is supported")
+    script_data.seek(6 + len(b"CDependencyFile") + 4, os.SEEK_CUR)
+    SkipString(script_data)  # Source path
+    script_data.seek(8, os.SEEK_CUR)
+    return struct.unpack("q", script_data.read(8))[0]
 
 
 def DetectCompression(overlay: BytesIO):
@@ -208,6 +228,9 @@ class SetupFactory8Extractor(SetupFactoryExtractor):
 
         script_data.seek(5, os.SEEK_CUR)
 
+        # Files of a dependency module (e.g. the VB6 runtime) are stored ahead of the archive files
+        self.overlay.seek(GetDependencySize(decompressed_data), os.SEEK_CUR)
+
         for _ in range(num_entries):
             SkipString(script_data)  # Full source path
             strBaseName = ReadString(script_data)  # Base name
@@ -224,7 +247,9 @@ class SetupFactory8Extractor(SetupFactoryExtractor):
             modTime = struct.unpack("q", script_data.read(8))[0]
             script_data.seek(25, os.SEEK_CUR)
             strDestDir = ReadString(script_data)  # Destination directory
-            if self.version[0] == 9 and self.version[1] >= 3:  # From version 9.3 script format slightly changed
+            if self.version[0] >= 10:  # Setup Factory 10 added one more byte here
+                script_data.seek(12, os.SEEK_CUR)
+            elif self.version[0] == 9 and self.version[1] >= 2:  # From version 9.2 script format slightly changed
                 script_data.seek(11, os.SEEK_CUR)
             else:
                 script_data.seek(10, os.SEEK_CUR)
@@ -257,7 +282,10 @@ class SetupFactory8Extractor(SetupFactoryExtractor):
             SkipString(script_data)  # File notes
             nCompSize = struct.unpack("q", script_data.read(8))[0]
             nCrc = struct.unpack("I", script_data.read(4))[0]
-            script_data.seek(8, os.SEEK_CUR)
+            if self.version[0] >= 10:  # Setup Factory 10 shortened the entry trailer
+                script_data.seek(3, os.SEEK_CUR)
+            else:
+                script_data.seek(8, os.SEEK_CUR)
 
             file_compression = COMPRESSION.NONE if nIsCompressed == 0 else script.compression
 
